@@ -2,6 +2,19 @@
 
 Manage [Axigen](https://www.axigen.com) mail servers directly from Claude Code. Create domains, accounts, configure services, manage queues, and more — all through natural language.
 
+## CAUTION: Use with Care in Production
+
+> **AI-generated commands may contain errors.** The language model may hallucinate commands that don't exist, omit critical steps (such as COMMIT or SAVE CONFIG), or navigate to the wrong CLI context. Destructive commands (REMOVE, PURGE, DELETE) executed without verification can cause **permanent data loss**. Service commands (STOP Service) can cause immediate outages.
+>
+> **Recommendations:**
+> 1. **Always review generated commands** before executing on production servers
+> 2. **Test on a staging environment first** — use a [Docker instance](https://www.axigen.com/documentation/deploying-running-axigen-in-docker-p686522391) for validation
+> 3. **Back up your configuration** (`SAVE CONFIG`) before making bulk changes
+> 4. **Use advisory mode** for critical operations — ask Claude for the command sequence, review it, then execute manually
+> 5. **Never grant unsupervised access** to production mail servers handling real user data
+>
+> This skill is a productivity tool, not a replacement for administrator judgment. The authors accept no liability for data loss or service disruption resulting from AI-generated commands.
+
 ## Installation
 
 ```bash
