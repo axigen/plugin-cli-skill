@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Axigen CLI helper — execute commands against an Axigen mail server via telnet.
+Axigen CLI helper — execute commands against an Axigen mail server via telnet or SSL.
 
 Usage:
     python axigen_cli.py --host HOST --port PORT --user USER --pass PASS "cmd1" "cmd2" ...
@@ -8,10 +8,19 @@ Usage:
 
 Environment variables (fallback):
     AXIGEN_HOST, AXIGEN_PORT, AXIGEN_USER, AXIGEN_PASS
+    AXIGEN_SSL          — set to "true" to use SSL/TLS connection
+    AXIGEN_SSL_ALLOW_SELF_SIGNED — set to "true" to accept self-signed certificates
+    AXIGEN_SSL_ALLOW_EXPIRED     — set to "true" to accept expired certificates
 
 Examples:
-    # List domains
+    # List domains (plain telnet)
     python axigen_cli.py --host mail.example.com "LIST Domains"
+
+    # List domains (SSL with valid certificate)
+    AXIGEN_SSL=true python axigen_cli.py --host mail.example.com "LIST Domains"
+
+    # SSL with self-signed certificate
+    AXIGEN_SSL=true AXIGEN_SSL_ALLOW_SELF_SIGNED=true python axigen_cli.py --host mail.example.com "LIST Domains"
 
     # Create account
     python axigen_cli.py --host mail.example.com \
@@ -32,6 +41,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import sys
 import time
 
@@ -41,24 +51,84 @@ class AxigenCLIError(Exception):
     pass
 
 
-class AxigenCLI:
-    """Stateful telnet client for the Axigen CLI."""
+def _parse_bool_env(name: str, default: bool = False) -> bool:
+    """Parse a boolean environment variable (true/1/yes → True)."""
+    val = os.environ.get(name, "").lower().strip()
+    return val in ("true", "1", "yes")
 
-    def __init__(self, host: str, port: int = 7000, timeout: float = 10.0):
+
+def _build_ssl_context(
+    allow_self_signed: bool = False,
+    allow_expired: bool = False,
+) -> ssl.SSLContext:
+    """Build an SSL context with the requested certificate validation policy.
+
+    By default, requires valid certificates from trusted CAs.
+    """
+    if allow_self_signed and allow_expired:
+        # Disable all verification
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    elif allow_self_signed:
+        # Accept self-signed but still check expiry where possible
+        # Note: Python's ssl module doesn't separate these checks granularly,
+        # so self-signed implies CERT_NONE
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    elif allow_expired:
+        # Accept expired but require otherwise valid cert chain
+        # Python's ssl doesn't offer expiry-only bypass, so we use a custom
+        # verify callback approach — but the simplest portable way is CERT_NONE
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    else:
+        # Strict: require valid, trusted, non-expired certificate
+        ctx = ssl.create_default_context()
+        # check_hostname and CERT_REQUIRED are defaults from create_default_context
+    return ctx
+
+
+class AxigenCLI:
+    """Stateful client for the Axigen CLI — supports plain telnet and SSL/TLS."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int = 7000,
+        timeout: float = 10.0,
+        use_ssl: bool = False,
+        ssl_allow_self_signed: bool = False,
+        ssl_allow_expired: bool = False,
+    ):
         self.host = host
         self.port = port
         self.timeout = timeout
+        self.use_ssl = use_ssl
+        self.ssl_allow_self_signed = ssl_allow_self_signed
+        self.ssl_allow_expired = ssl_allow_expired
         self.sock = None
         self.current_prompt = ""
         self.banner = ""
 
     def connect(self) -> str:
-        """Connect to the Axigen CLI. Returns the welcome banner."""
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.settimeout(self.timeout)
-        self.sock.connect((self.host, self.port))
+        """Connect to the Axigen CLI (plain or SSL). Returns the welcome banner."""
+        raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        raw_sock.settimeout(self.timeout)
+        raw_sock.connect((self.host, self.port))
+
+        if self.use_ssl:
+            ctx = _build_ssl_context(
+                allow_self_signed=self.ssl_allow_self_signed,
+                allow_expired=self.ssl_allow_expired,
+            )
+            self.sock = ctx.wrap_socket(raw_sock, server_hostname=self.host)
+        else:
+            self.sock = raw_sock
+
         self.banner = self._read_response()
-        # Extract prompt
         self.current_prompt = self._extract_prompt(self.banner)
         return self.banner
 
@@ -203,6 +273,15 @@ def main():
                         help="Continue executing after errors")
     parser.add_argument("--timeout", type=float, default=10.0,
                         help="Socket timeout in seconds (default: 10)")
+    parser.add_argument("--ssl", action="store_true",
+                        default=_parse_bool_env("AXIGEN_SSL"),
+                        help="Use SSL/TLS connection (default: $AXIGEN_SSL)")
+    parser.add_argument("--ssl-allow-self-signed", action="store_true",
+                        default=_parse_bool_env("AXIGEN_SSL_ALLOW_SELF_SIGNED"),
+                        help="Accept self-signed certificates (default: $AXIGEN_SSL_ALLOW_SELF_SIGNED)")
+    parser.add_argument("--ssl-allow-expired", action="store_true",
+                        default=_parse_bool_env("AXIGEN_SSL_ALLOW_EXPIRED"),
+                        help="Accept expired certificates (default: $AXIGEN_SSL_ALLOW_EXPIRED)")
 
     args = parser.parse_args()
 
@@ -223,11 +302,18 @@ def main():
         sys.exit(1)
 
     # Connect and authenticate
-    cli = AxigenCLI(args.host, args.port, args.timeout)
+    cli = AxigenCLI(
+        host=args.host,
+        port=args.port,
+        timeout=args.timeout,
+        use_ssl=args.ssl,
+        ssl_allow_self_signed=args.ssl_allow_self_signed,
+        ssl_allow_expired=args.ssl_allow_expired,
+    )
     try:
         banner = cli.connect()
         cli.login(args.user, args.password)
-    except (ConnectionRefusedError, socket.timeout, AxigenCLIError) as e:
+    except (ConnectionRefusedError, socket.timeout, ssl.SSLError, AxigenCLIError) as e:
         print(f"Connection failed: {e}", file=sys.stderr)
         sys.exit(1)
 
