@@ -28,6 +28,17 @@ Manage [Axigen](https://www.axigen.com) mail servers directly from Claude Code. 
 /reload-plugins
 ```
 
+## Quick Version Check (No Credentials Needed)
+
+You can check the server version without authentication:
+
+```bash
+python3 axigen_cli.py --host mail.example.com --get-version
+# Output: 10.6.30|Linux|x86_64
+```
+
+This sends `GET VERSION` at the `<login>` prompt — a pre-authentication command available since Axigen 10.x.
+
 ## Configuration
 
 The skill connects to an Axigen server's CLI port (default: 7000) via telnet. You need to provide connection credentials through environment variables.
@@ -90,7 +101,7 @@ export AXIGEN_PASS=$(aws secretsmanager get-secret-value --secret-id axigen-admi
 - **Never commit credentials** to version control. Add `.env` to your `.gitignore`.
 - The `AXIGEN_PASS` variable is read by the Python helper at runtime and never logged or echoed.
 - For Docker deployments, pass credentials via `docker run -e AXIGEN_PASS=...` or Docker secrets.
-- The CLI connection is unencrypted (plain telnet). Use on trusted networks or via SSH tunnel:
+- The CLI connection is unencrypted by default (plain telnet). SSL/TLS is supported with `--ssl`. Use on trusted networks or via SSH tunnel:
   ```bash
   ssh -L 7000:localhost:7000 user@mail.example.com
   export AXIGEN_HOST=127.0.0.1
@@ -163,6 +174,9 @@ Once credentials are set, just ask Claude in natural language:
 Axigen's CLI uses a hierarchical context model. You navigate into contexts, make changes, then save:
 
 ```
+<login> (pre-auth)
+├── GET VERSION — no credentials needed
+├── USER <user> → <password> → <#> (authenticated root)
 <#> (root)
 ├── CONFIG SERVER → <server#>
 │   ├── CONFIG IMAP → <server-imap#>

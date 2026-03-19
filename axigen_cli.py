@@ -282,8 +282,36 @@ def main():
     parser.add_argument("--ssl-allow-expired", action="store_true",
                         default=_parse_bool_env("AXIGEN_SSL_ALLOW_EXPIRED"),
                         help="Accept expired certificates (default: $AXIGEN_SSL_ALLOW_EXPIRED)")
+    parser.add_argument("--get-version", action="store_true",
+                        help="Get server version without authentication (pre-auth command)")
 
     args = parser.parse_args()
+
+    # Handle --get-version (no auth required)
+    if args.get_version:
+        cli = AxigenCLI(
+            host=args.host,
+            port=args.port,
+            timeout=args.timeout,
+            use_ssl=args.ssl,
+            ssl_allow_self_signed=args.ssl_allow_self_signed,
+            ssl_allow_expired=args.ssl_allow_expired,
+        )
+        try:
+            cli.connect()
+            resp = cli.send("GET VERSION")
+            # Extract version line (e.g. "10.6.30|Linux|x86_64")
+            for line in resp.split("\n"):
+                line = line.strip()
+                if line and not line.startswith("+OK") and not line.startswith("<"):
+                    print(line)
+                    break
+        except (ConnectionRefusedError, socket.timeout, ssl.SSLError) as e:
+            print(f"Connection failed: {e}", file=sys.stderr)
+            sys.exit(1)
+        finally:
+            cli.close()
+        sys.exit(0)
 
     # Collect commands
     commands = list(args.commands)

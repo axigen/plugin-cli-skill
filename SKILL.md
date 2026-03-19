@@ -23,6 +23,25 @@ export AXIGEN_USER=admin
 export AXIGEN_PASS=thepassword
 ```
 
+## Pre-Authentication Commands (Login Context)
+
+Before authenticating, the `<login>` prompt supports these commands:
+
+| Command | Description |
+|---------|-------------|
+| `GET VERSION` | Returns server version, OS, and architecture (e.g. `10.6.30\|Linux\|x86_64`) |
+| `SET CONSOLE-CODES on\|off` | Enable/disable color and console codes |
+| `SET QUIET off\|on` | Enable/disable detailed information |
+| `SHOW` | Show options for the login context |
+| `HELP` | List available login commands |
+
+**Get version without credentials:**
+```bash
+python axigen_cli.py --host mail.example.com --get-version
+```
+
+This is useful for diagnostics and version checks without needing admin credentials.
+
 ## Executing Commands
 
 Use the `axigen_cli.py` helper script (located alongside this skill file) to execute CLI commands:
@@ -139,6 +158,9 @@ The Axigen CLI uses a **hierarchical context model**. You navigate into contexts
 ## Context Hierarchy
 
 ```
+<login> (pre-auth)
+├── GET VERSION — no credentials needed
+├── USER <user> → <password> → <#> (authenticated root)
 <#> (root)
 ├── CONFIG SERVER
 │   ├── CONFIG IMAP / POP3 / SMTP-INCOMING / SMTP-OUTGOING / WEBMAIL / WEBADMIN / ...
