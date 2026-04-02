@@ -1,238 +1,298 @@
 ---
 name: axigen-cli
-description: Use when the user needs to manage an Axigen mail server - creating domains, accounts, configuring services, running diagnostics, or any Axigen CLI task. Provides complete command reference and a Python helper for executing CLI commands via telnet.
+description: Use when the user needs to manage an Axigen mail server - creating domains, accounts, configuring services, running diagnostics, or any Axigen CLI administration task
 ---
 
 # Axigen CLI Skill
 
-You can manage Axigen mail servers through the CLI (Command Line Interface) accessible via telnet on port 7000.
+Manage Axigen mail servers through the telnet-based admin CLI (port 7000). This skill supports two modes:
 
-## Setup
+1. **Generate commands** - produce CLI command sequences the user copy-pastes into a terminal.
+2. **Execute live** - run commands against a server using the Python helper (`axigen_cli.py` in this skill directory).
 
-Before running commands, you need connection details. Ask the user for:
-- **Host**: Axigen server hostname or IP
-- **Port**: CLI port (default: 7000)
-- **Admin password**: required for authentication
+For full command syntax in every context, consult `cli-reference.md` in this skill directory.
 
-Set them as environment variables so subsequent calls don't need to repeat them:
+## Protocol Overview
 
-```bash
-export AXIGEN_HOST=mail.example.com
-export AXIGEN_PORT=7000
-export AXIGEN_USER=admin
-export AXIGEN_PASS=thepassword
+- Transport: plain TCP to port 7000 (telnet protocol). Line endings are CRLF.
+- Authentication: send `user <username>`, then the password on the next prompt.
+- Response codes: `+OK` = success, `-ERR` = failure.
+- The prompt indicates the current context: `<#>` (root), `<domain#>`, `<account#>`, `<account-quotas#>`, etc.
+
+## Context Navigation Model
+
+The CLI is a hierarchical context tree. You must navigate to the correct context before issuing commands.
+
+```
+Root (<#>)
+  ├── UPDATE Domain <name>        -> domain context
+  │     ├── UPDATE Account <name> -> account context
+  │     │     ├── CONFIG Quotas   -> quotas subcontext
+  │     │     │     └── DONE      -> back to account
+  │     │     └── COMMIT          -> back to domain
+  │     └── COMMIT                -> back to root
+  ├── CONFIG Server               -> server context
+  ├── CONFIG Imap / SmtpIncoming / SmtpOutgoing / Pop3 / etc.
+  └── ADD Domain <name>           -> domain-create context
 ```
 
-## Pre-Authentication Commands (Login Context)
+### Navigation Rules
 
-Before authenticating, the `<login>` prompt supports these commands:
+1. Navigate to the correct context before issuing commands.
+2. `COMMIT` saves changes in the current context and returns to the parent.
+3. `BACK` discards changes and returns to the parent.
+4. `DONE` saves and returns from subcontexts (quotas, limits, webmaildata, etc.).
+5. `ADD` creates a new object - enters its context, set attributes, then `COMMIT`.
+6. `UPDATE` enters an existing object for modification.
+7. `SAVE Config` at root persists all running changes to disk.
+8. For multiple independent changes, navigate back to root between each one.
 
-| Command | Description |
-|---------|-------------|
-| `GET VERSION` | Returns server version, OS, and architecture (e.g. `10.6.30\|Linux\|x86_64`) |
-| `SET CONSOLE-CODES on\|off` | Enable/disable color and console codes |
-| `SET QUIET off\|on` | Enable/disable detailed information |
-| `SHOW` | Show options for the login context |
-| `HELP` | List available login commands |
+## Command Generation Rules
 
-**Get version without credentials:**
-```bash
-python axigen_cli.py --host mail.example.com --get-version
-```
+When generating CLI command sequences for the user:
 
-This is useful for diagnostics and version checks without needing admin credentials.
+- Always navigate to the correct context first.
+- Always end with `COMMIT` (not `BACK`) if changes were made.
+- Always include `SAVE Config` at root after making changes.
+- Use `<password>` as a placeholder for passwords - never hardcode real passwords.
+- Show one command per line.
+- Add `# explanation` comments for complex sequences.
 
 ## Executing Commands
 
-Use the `axigen_cli.py` helper script (located alongside this skill file) to execute CLI commands:
+There are two tools available for running CLI commands on a live server:
+
+### Option A: `axigen_cli.py` (bundled with this skill)
+
+Takes commands as separate arguments — suited for structured, multi-step sequences with error control:
 
 ```bash
-python /path/to/skill/axigen_cli.py "COMMAND1" "COMMAND2" "COMMAND3"
+# Execute a sequence of commands
+python3 axigen_cli.py --commands 'CMD1' 'CMD2' 'CMD3'
+
+# Single read-only query
+python3 axigen_cli.py --query 'LIST Domains'
+
+# Dump CLI help tree from the server
+python3 axigen_cli.py --dump-help /tmp/cliHelp.txt
 ```
 
-The script connects, authenticates, executes commands sequentially, and returns a transcript showing prompts and responses.
+Use the path relative to this skill directory (where this SKILL.md lives). If the skill is installed at a known path, use that absolute path.
 
-### Examples
+**Required environment variables:**
 
-**List domains:**
+| Variable      | Required | Default  | Description              |
+|---------------|----------|----------|--------------------------|
+| `AXIGEN_HOST` | Yes      | -        | Server hostname or IP    |
+| `AXIGEN_PORT` | No       | `7000`   | CLI port                 |
+| `AXIGEN_USER` | No       | `admin`  | Admin username           |
+| `AXIGEN_PASS` | Yes      | -        | Admin password           |
+
+### Option B: `run-cli.py` (official Axigen automation script)
+
+Download from: https://www.axigen.com/mail-server/scripts/download/?tool=run-cli.py  
+Recommended install path: `/opt/axigen/scripts/run-cli.py`
+
+Commands are passed as a **single string separated by `|`** (pipe). This script is simpler and faster to use for one-liners, shell scripts, and bulk operations.
+
 ```bash
-python axigen_cli.py "LIST Domains"
+# Basic usage — pipe commands in a single quoted string
+./run-cli.py "update domain my.domain.org|list accounts"
+
+# FOREACH — iterate over all domains or accounts (virtual command)
+./run-cli.py "foreach domain|list accounts"
+
+# FOREACH over all accounts in all domains
+CLIRESPONSE=0 ./run-cli.py "foreach domain|foreach account|config contactinfo|show|back"
+
+# Read commands from stdin (use - as the argument)
+echo "list domains" | ./run-cli.py -
+
+# SSL connection
+./run-cli.py "list domains" admin-password 127.0.0.1:7000:ssl
 ```
 
-**Create a domain:**
-```bash
-python axigen_cli.py \
-    "CREATE Domain name example.com domainLocation /axigen/var/domains/example.com wmFilterTemplatePath none postmasterPassword SecurePass123" \
-    "COMMIT"
-```
+**Configuration — environment variables or inline args:**
 
-**Create an account:**
-```bash
-python axigen_cli.py \
-    "UPDATE Domain name example.com" \
-    "ADD Account name john password SecurePass123" \
-    "CONFIG ContactInfo" \
-    "SET firstName John" \
-    "SET lastName Doe" \
-    "DONE" \
-    "CONFIG Quotas" \
-    "SET totalMessageSize 102400" \
-    "DONE" \
-    "COMMIT"
-```
+| Variable / Arg        | Description                                       |
+|-----------------------|---------------------------------------------------|
+| `CLIHOST`             | Server IP (default: `127.0.0.1`)                  |
+| `CLIPORT`             | CLI port (default: `7000`)                        |
+| `CLIPASS`             | Admin password (env var)                          |
+| `CLIRESPONSE`         | Output verbosity: `1`=full (default), `0`=silent, `2`=minimal |
+| 2nd positional arg    | Admin password (overrides `CLIPASS`)              |
+| 3rd positional arg    | `host[:port[:conn-type]]` — `conn-type`: `raw` or `ssl` |
 
-**Delete an account:**
-```bash
-python axigen_cli.py \
-    "UPDATE Domain name example.com" \
-    "REMOVE Account name john" \
-    "COMMIT"
-```
+**Special virtual commands (only in `run-cli.py`):**
 
-**Suspend an account (set empty services via account class):**
-```bash
-python axigen_cli.py \
-    "UPDATE Domain name example.com" \
-    "UPDATE Account name john" \
-    "SET mustChangePass yes" \
-    "COMMIT"
-```
+| Command          | Description                                              |
+|------------------|----------------------------------------------------------|
+| `FOREACH DOMAIN` | Iterates over all active domains                         |
+| `FOREACH ACCOUNT`| Iterates over all accounts in current domain context     |
+| `REMOVE-ITEM`    | Removes the current FOREACH item (e.g. delete account)   |
+| `info`           | Prints the current object name inside a FOREACH loop     |
+| `SHOW ATTR`      | Extended SHOW with attribute details                     |
 
-**Configure IMAP SSL:**
-```bash
-python axigen_cli.py \
-    "CONFIG SERVER" \
-    "CONFIG IMAP" \
-    "UPDATE Listener address 0.0.0.0:993" \
-    "CONFIG sslControl" \
-    "SET certFile /path/to/cert.pem" \
-    "SET allowedVersions (tls1_2 tls1_3)" \
-    "DONE" \
-    "COMMIT" \
-    "BACK" \
-    "BACK" \
-    "SAVE CONFIG"
-```
+**When to prefer `run-cli.py` over `axigen_cli.py`:**
+- Bulk operations across all domains or accounts (`FOREACH`)
+- Shell one-liners and cron jobs (simpler invocation syntax)
+- The script is already installed on the Axigen server (`/opt/axigen/scripts/`)
+- Piping commands from stdin or another script
 
-**Check mail queue:**
-```bash
-python axigen_cli.py \
-    "ENTER QUEUE" \
-    "LIST" \
-    "BACK"
-```
+**When to prefer `axigen_cli.py`:**
+- Need JSON output for programmatic parsing
+- Structured multi-step sequences with context-aware error handling
+- Invoked by Claude to automate tasks in this skill
 
-**JSON output (for programmatic parsing):**
-```bash
-python axigen_cli.py --json "LIST Domains"
-```
+## Looking Up Command Syntax
 
-## CLI Navigation Model
+When you need command syntax for a specific context, read the relevant section from `cli-reference.md` in this skill directory. **Do NOT read the entire file** - it is over 2500 lines.
 
-The Axigen CLI uses a **hierarchical context model**. You navigate into contexts, make changes, then save:
+Use targeted lookups:
 
-### Entering Contexts
-| Pattern | Example | Meaning |
-|---------|---------|---------|
-| `CONFIG <name>` | `CONFIG IMAP` | Enter service sub-config |
-| `UPDATE <entity> name <n>` | `UPDATE Domain name example.com` | Enter entity for editing (full access) |
-| `ADD <entity> [params]` | `ADD Account name john password Pass123` | Create entity and enter it |
-| `CREATE <entity> [params]` | `CREATE Domain name ...` | Create top-level entity |
-| `ENTER <name>` | `ENTER QUEUE` | Enter special context |
+1. Grep for the section header: `Grep for "## Context: domain$"` in `cli-reference.md`.
+2. Read ~170 lines from that match offset to get the full context section.
 
-### Saving & Exiting
-| Command | When to Use |
-|---------|-------------|
-| `COMMIT` | Save changes to an entity (domain, account, listener) and return to parent |
-| `DONE` | Save sub-config changes (quotas, limits, contactInfo, sslControl) and return |
-| `BACK` | **Discard** all changes and return to parent |
-| `SAVE CONFIG` | Save running config to disk (from root `<#>` context) |
-| `EXIT` | Close the CLI session |
+Examples:
+- Domain commands: grep for `## Context: domain$`
+- Account commands: grep for `## Context: account$`
+- SMTP outgoing: grep for `## Context: smtpOutgoing$`
+- Queue management: grep for `## Context: queue$`
 
-### Important Rules
-1. **Always COMMIT** after ADD/UPDATE operations on entities, or changes are lost
-2. **Use DONE** (not COMMIT) for sub-configurations like Quotas, Limits, ContactInfo
-3. **BACK discards** — it cancels all uncommitted changes in the current context
-4. **SAVE CONFIG** after all changes to persist across server restarts
+## Refreshing the CLI Reference
 
-## Context Hierarchy
+When the user wants to update the reference to match their server version:
+
+1. Run `python3 axigen_cli.py --dump-help /tmp/cliHelp.txt` to extract the help tree.
+2. Retrieve the dump from the server: `scp <host>:/tmp/cliHelp.txt .`
+3. Convert the dump to markdown following the same format as `cli-reference.md`.
+4. Replace `cli-reference.md` with the new version.
+
+## Safety Rules
+
+### REQUIRE user confirmation before executing
+
+These commands are destructive or disruptive. Always ask the user to confirm before running them:
+
+- `REMOVE` - deletes accounts, domains, listeners, etc.
+- `PURGE` - permanently removes messages, metadata, or backups
+- `STOP Service` - takes a service offline
+- `COMPACT` - compacts storage (locks mailboxes)
+- `RESET` - resets configuration to last saved state
+- Any command in a `DEBUG` context
+
+### Run freely (read-only)
+
+These commands are safe to execute without confirmation:
+
+- `SHOW`, `LIST`, `HELP`, `QUERY`
+
+### Password handling
+
+- Use `<password>` placeholder in generated command sequences.
+- For live execution, read passwords from the `AXIGEN_PASS` environment variable. Never echo or log passwords.
+- When creating accounts, ask the user to provide the account password.
+
+## Common Task Recipes
+
+### Create a domain
 
 ```
-<login> (pre-auth)
-├── GET VERSION — no credentials needed
-├── USER <user> → <password> → <#> (authenticated root)
-<#> (root)
-├── CONFIG SERVER
-│   ├── CONFIG IMAP / POP3 / SMTP-INCOMING / SMTP-OUTGOING / WEBMAIL / WEBADMIN / ...
-│   │   ├── CONFIG AccessControl
-│   │   ├── ADD/UPDATE Listener
-│   │   │   └── CONFIG sslControl
-│   │   └── START/STOP Service
-│   ├── CONFIG FILTERS
-│   │   ├── ADD ScriptFilter / SocketFilter / IntegratedFilter
-│   │   └── ADD ActiveFilter
-│   ├── CONFIG CLUSTER / CERTS / MOBILITY / SECURITY / USERDB / ...
-│   └── CONFIG PERMISSIONS
-├── UPDATE Domain name <domain>
-│   ├── ADD/UPDATE Account name <account>
-│   │   ├── CONFIG ContactInfo / Quotas / Limits / WebmailData / Filters / SendRecvRestrictions
-│   │   └── COMMIT
-│   ├── ADD/UPDATE Group / List / FolderRcpt / accountClass
-│   ├── CONFIG FILTERS / adminLimits / PERMISSIONS / PUBLIC-FOLDER / MIGRATIONDATA
-│   └── COMMIT
-├── ENTER QUEUE
-│   ├── LIST / LIST FILTER / LIST ID <id>
-│   ├── DELETE <id> / DELIVER <id>
-│   └── ENTER QUARANTINE
-├── ENTER AACL
-│   ├── ADD/UPDATE admin-group / admin-user
-│   └── GRANT/REVOKE permission
-└── SAVE CONFIG / SHOW LicenseInfo / SEARCH Object
+ADD Domain name example.com postmasterPassword <password>
+SET domainLocation /var/opt/axigen/domains/example.com
+ADD MessagesLocation file:///var/opt/axigen/domains/example.com/messages
+COMMIT
+SAVE Config
 ```
 
-## Common Tasks Reference
+### Create an account
 
-### Domain Operations
-- `LIST Domains` — list all active domains
-- `LIST AllDomains` — list all domains including disabled
-- `CREATE Domain name <n> domainLocation <path> wmFilterTemplatePath none postmasterPassword <p>` — create domain
-- `UPDATE Domain name <n>` — enter domain for full management
-- `EDIT Domain name <n>` — enter domain for property changes only
-- `DISABLE Domain name <n>` — deactivate a domain
-- `ENABLE Domain name <n>` — reactivate a domain
-- `DELETE Domain name <n>` — permanently delete a domain
+```
+UPDATE Domain example.com
+ADD Account name john password <password>
+COMMIT
+BACK
+SAVE Config
+```
 
-### Account Operations (inside domain context)
-- `LIST Accounts` — list accounts
-- `ADD Account name <n> password <p>` — create account (enters account context)
-- `UPDATE Account name <n>` — edit account (enters account context)
-- `REMOVE Account name <n>` — delete account
-- `SHOW Account name <n>` — view account details
+### Create an account with quota
 
-### Account Sub-Contexts (inside account context)
-- `CONFIG ContactInfo` → SET firstName, lastName, company, phone, email, etc. → `DONE`
-- `CONFIG Quotas` → SET totalMessageSize, totalMessageCount, mboxCount → `DONE`
-- `CONFIG Limits` → SET enableActiveSync, enableSharing, minimumPasswordLength, etc. → `DONE`
-- `CONFIG WebmailData` → SET language, timeZone, skin, dateFormat → `DONE`
-- `CONFIG SendRecvRestrictions` → SET enableSendRestrictions, sendPolicy → `DONE`
-- `CONFIG Filters` → ADD ScriptFilter, ADD ActiveFilter → `DONE`
+```
+UPDATE Domain example.com
+ADD Account name john password <password>
+CONFIG Quotas
+SET messageSizeQuota 1073741824
+DONE
+COMMIT
+BACK
+SAVE Config
+```
 
-### Queue Operations
-- `ENTER QUEUE` → `LIST` — view queued messages
-- `LIST FILTER sender=<addr>` — filter by sender
-- `LIST FILTER age>1d` — filter by age
-- `LIST ID <id>` — view message details
-- `DELETE <id>` — remove message from queue
-- `FORCE QUEUE` — retry delivery of all queued messages
+### List domains
 
-### Server Information
-- `SHOW LicenseInfo` — license details
-- `SHOW PremiumAddonsStatistics` — addon usage
-- `SHOW MigrationStatus` — migration status
-- `SHOW AccountingStatistics` — accounting stats
-- `SEARCH Object <email>` — find account by email address
-- `SAVE supportInfo` — generate diagnostics zip
+```
+LIST Domains
+```
 
-## Full Command Reference
+### List accounts in a domain
 
-For the complete list of all commands in all 126 CLI contexts, see `cli-reference.md` in this skill directory.
+```
+UPDATE Domain example.com
+LIST Accounts
+BACK
+```
+
+### Change account password
+
+```
+UPDATE Domain example.com
+UPDATE Account name john
+SET password <password>
+COMMIT
+BACK
+SAVE Config
+```
+
+### Start/stop a service
+
+```
+# Stop IMAP
+CONFIG Imap
+STOP Service
+COMMIT
+SAVE Config
+```
+
+```
+# Start IMAP
+CONFIG Imap
+START Service
+COMMIT
+SAVE Config
+```
+
+### Configure SMTP relay
+
+```
+CONFIG SmtpOutgoing
+SET relayHost relay.example.com
+SET relayPort 25
+COMMIT
+SAVE Config
+```
+
+### Check DNS resolution
+
+```
+CONFIG Dnr
+QUERY MX example.com
+BACK
+```
+
+### View mail queue
+
+```
+CONFIG Queue
+LIST Messages
+BACK
+```
